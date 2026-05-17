@@ -234,6 +234,7 @@ echo "Reply with exactly the token OK and nothing else." > "$RUN_DIR/probe.in"
 with_timeout 30 codex exec \
   --skip-git-repo-check \
   -s read-only \
+  -c model="gpt-5.2" \
   -c model_reasoning_effort="low" \
   --output-last-message "$RUN_DIR/probe.out" \
   - < "$RUN_DIR/probe.in" > "$RUN_DIR/probe.jsonl" 2>&1
@@ -421,7 +422,8 @@ N=$(cat "$RUN_DIR/plan.round")
 with_timeout 600 codex exec \
   --skip-git-repo-check \
   -s read-only \
-  -c model_reasoning_effort="medium" \
+  -c model="gpt-5.2" \
+  -c model_reasoning_effort="xhigh" \
   --json \
   --output-last-message "$RUN_DIR/review.v${N}.md" \
   - \
@@ -430,7 +432,7 @@ with_timeout 600 codex exec \
 echo "$?" > "$RUN_DIR/codex.v${N}.rc"
 ```
 
-Notes on flags: `--skip-git-repo-check` lets Codex run with the scratch dir; `medium` reasoning is enough for prose-shape plan reviews (Step 4 bumps to `xhigh`); `-s read-only` keeps Codex inside the non-interactive sandbox; `--output-last-message` writes Codex's final turn; `--json` streams events; `-` reads the prompt from stdin.
+Notes on flags: `--skip-git-repo-check` lets Codex run with the scratch dir; `gpt-5.2` at `xhigh` reasoning is the standard reviewer pairing for both plan and diff reviews; `-s read-only` keeps Codex inside the non-interactive sandbox; `--output-last-message` writes Codex's final turn; `--json` streams events; `-` reads the prompt from stdin.
 
 ### 2c. Render the CODEX RESPONSE banner — ALWAYS, even on session error
 
@@ -736,6 +738,7 @@ M=$(cat "$RUN_DIR/impl.round")
 with_timeout 600 codex exec \
   --skip-git-repo-check \
   -s read-only \
+  -c model="gpt-5.2" \
   -c model_reasoning_effort="xhigh" \
   --json \
   --output-last-message "$RUN_DIR/review.diff.v${M}.md" \
