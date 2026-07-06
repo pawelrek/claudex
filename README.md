@@ -30,6 +30,8 @@ Same-model review is demonstrably lenient — a Claude reviewer grading Claude-w
 
 The two Sonnet seats are deliberately differentiated so they don't collapse into one perspective: VULCAN hunts security defects bottom-up from untrusted inputs and dangerous sinks; MERIDIAN hunts correctness defects top-down from function contracts, simulating execution.
 
+A fourth, **non-scoring EXECUTOR seat** runs the project's test suite every implementation-review round. Its exit codes gate convergence — a RED suite can never pass, regardless of reviewer scores — because a panel that only *reads* diffs will green-light code that doesn't *run*.
+
 ## Review contract
 
 Every reviewer returns:
@@ -43,7 +45,7 @@ MINOR:      — fix when cheap
 POLISHING:  — cosmetic, never required
 ```
 
-Convergence (both loops): **juror score > 8.5 AND the juror's accepted BLOCKING list is empty.** Safety cap: 20 rounds per loop. A round is valid on a quorum of ≥ 2 parseable reviews including codex. A reviewer scoring ≤ 8.5 with nothing actionable is flagged MALFORMED; an unsubstantiated "CLEAN" is discarded.
+Convergence (both loops): **juror score > 8.5 AND the juror's accepted BLOCKING list is empty** — and in the diff loop, additionally an EXEC REPORT of `GREEN` or `NO_TESTS`: static review never replaces execution, so a red test suite can never converge regardless of reviewer scores. Safety cap: 20 rounds per loop. A round is valid on a quorum of ≥ 2 parseable reviews including codex. A reviewer scoring ≤ 8.5 with nothing actionable is flagged MALFORMED; an unsubstantiated "CLEAN" is discarded.
 
 ## Requirements
 
@@ -81,11 +83,15 @@ Interrupted runs (session limits, crashes, context loss) resume from the last co
   "allow_anthropic_only": true,
   "score_target": 8.5,
   "max_rounds": 20,
-  "max_fix_rounds": 20
+  "max_fix_rounds": 20,
+  "test_command": "pytest -q",
+  "executor_model": "sonnet"
 }
 ```
 
 `allow_anthropic_only` lets a run continue on the two Sonnet seats when Codex is unavailable (missing CLI, expired session, exhausted quota) — as loudly-flagged **DEGRADED** rounds recorded in the report, never silently. Off by default: the external seat is the design's main defense.
+
+`test_command` pins exactly what the EXECUTOR runs (empty = auto-detect the project's runner). `executor_model` defaults to `sonnet`; `haiku` is a fine choice when `test_command` is pinned — the seat needs honest command execution and faithful reporting, not judgment.
 
 ## What you see while it runs
 

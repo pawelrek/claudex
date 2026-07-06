@@ -1,6 +1,6 @@
 ---
 name: claudex
-description: "Plan + implement a feature with a 3-seat independent review panel: Codex (newest GPT, resolved at runtime) + two blinded, deliberately-differentiated Sonnet personas (VULCAN security bottom-up, MERIDIAN correctness top-down) review in PARALLEL; the main-thread model orchestrates and adjudicates every finding as FINAL JUROR. Score-gated plan-review loop, then implementation diff-review loop, each converging only at juror score > 8.5 with zero accepted BLOCKING items. Reads per-project .claudex.json (allow_anthropic_only, score_target, max_rounds). Invoke as /claudex <feature spec>, /claudex resume to continue an interrupted run, or whenever the user wants high-assurance feature work cross-checked by independent models."
+description: "Plan + implement a feature with a 3-seat independent review panel: Codex (newest GPT, resolved at runtime) + two blinded, deliberately-differentiated Sonnet personas (VULCAN security bottom-up, MERIDIAN correctness top-down) review in PARALLEL; the main-thread model orchestrates and adjudicates every finding as FINAL JUROR. Score-gated plan-review loop, then implementation diff-review loop, each converging only at juror score > 8.5 with zero accepted BLOCKING items. A non-scoring EXECUTOR seat runs the project's test suite every diff round — RED blocks convergence. Reads per-project .claudex.json (allow_anthropic_only, score_target, max_rounds, test_command, executor_model). Invoke as /claudex <feature spec>, /claudex resume to continue an interrupted run, or whenever the user wants high-assurance feature work cross-checked by independent models."
 ---
 
 # /claudex — Plan + implement with a 3-model independent review panel
@@ -56,6 +56,7 @@ State that has to survive between separated Bash calls is persisted to **files**
 | `codex` | Newest GPT the Codex CLI offers (resolved at runtime from `~/.codex/models_cache.json`; currently `gpt-5.5`) | The External Auditor | Full-scope: spec fidelity, correctness, completeness, risk | `codex exec` via background Bash | **Yes** (preflight-fatal AND quorum-mandatory) — unless `.claudex.json` sets `allow_anthropic_only`, which degrades instead of aborting |
 | `vulcan` | Claude Sonnet subagent | VULCAN — Hostile Security Auditor | Security, abuse, tenant isolation, data integrity, resource exhaustion — reviews BOTTOM-UP from untrusted inputs and dangerous sinks | `Agent` tool, `model: "sonnet"` | Quorum member |
 | `meridian` | Claude Sonnet subagent | MERIDIAN — Staff Correctness Reviewer | Logic, edge cases, contracts, concurrency, error paths — reviews TOP-DOWN from contracts, simulating execution | `Agent` tool, `model: "sonnet"` | Quorum member |
+| `executor` | Claude Sonnet subagent by default (`.claudex.json` `executor_model`; use `haiku` when `test_command` is pinned) | The Test Runner | Diff loop only: runs the project's test suite, reports GREEN/RED/NO_TESTS with verbatim failures | `Agent` tool | **Non-scoring**, but gating: no parseable exec report or RED ⇒ no convergence |
 | — | Main-thread model | **FINAL JUROR + orchestrator** | Verifies every finding against the artifact, dedupes, scores, gates | (this conversation) | Always |
 
 **Why personas + blinding exist:** same-model review is demonstrably lenient — a Claude reviewer grading Claude-written code under-reports. Blinding plus the external codex seat are the countermeasure, and the two Sonnet seats are deliberately differentiated (opposite review directions, disjoint primary lenses) so they don't collapse into one perspective. Do not weaken any of it.
@@ -175,23 +176,31 @@ echo "2"   > "$RUN_DIR/panel-quorum"        # min parseable reviews per round (m
 
 # 0d-bis. Per-project config: .claudex.json at the repo root (optional):
 #   { "allow_anthropic_only": true, "score_target": 8.5,
-#     "max_rounds": 20, "max_fix_rounds": 20 }
+#     "max_rounds": 20, "max_fix_rounds": 20,
+#     "test_command": "pytest -q", "executor_model": "sonnet" }
 # allow_anthropic_only=true permits DEGRADED Claude-only rounds when codex is
 # missing/dead (loud banner + report callout) instead of aborting the run.
+# test_command pins what the EXECUTOR seat runs (empty = auto-detect);
+# executor_model picks its engine (haiku is fine when test_command is pinned).
 echo 0 > "$RUN_DIR/allow-anthropic-only"
+: > "$RUN_DIR/test-command"
+echo "sonnet" > "$RUN_DIR/executor-model"
 CFG="$REPO_ROOT/.claudex.json"
 if [ -f "$CFG" ]; then
-  CFG_VALS=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(1 if d.get("allow_anthropic_only") else 0);print(d.get("score_target",8.5));print(int(d.get("max_rounds",20)));print(int(d.get("max_fix_rounds",20)))' "$CFG" 2>/dev/null)
+  CFG_VALS=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(1 if d.get("allow_anthropic_only") else 0);print(d.get("score_target",8.5));print(int(d.get("max_rounds",20)));print(int(d.get("max_fix_rounds",20)));print(d.get("test_command",""));print(d.get("executor_model","sonnet"))' "$CFG" 2>/dev/null)
   if [ -n "$CFG_VALS" ]; then
     printf '%s\n' "$CFG_VALS" | sed -n 1p > "$RUN_DIR/allow-anthropic-only"
     CFG_ST=$(printf '%s\n' "$CFG_VALS" | sed -n 2p)
     CFG_MR=$(printf '%s\n' "$CFG_VALS" | sed -n 3p)
     CFG_MF=$(printf '%s\n' "$CFG_VALS" | sed -n 4p)
+    printf '%s\n' "$CFG_VALS" | sed -n 5p > "$RUN_DIR/test-command"
+    CFG_EM=$(printf '%s\n' "$CFG_VALS" | sed -n 6p)
     # Numeric-shape guards: a malformed value keeps the 0d default (fail-safe).
     case "$CFG_ST" in ''|*[!0-9.]*) ;; *) echo "$CFG_ST" > "$RUN_DIR/score-target" ;; esac
     case "$CFG_MR" in ''|*[!0-9]*)  ;; *) echo "$CFG_MR" > "$RUN_DIR/max-rounds" ;; esac
     case "$CFG_MF" in ''|*[!0-9]*)  ;; *) echo "$CFG_MF" > "$RUN_DIR/max-fix-rounds" ;; esac
-    echo "Config: .claudex.json applied (allow_anthropic_only=$(cat "$RUN_DIR/allow-anthropic-only"), score_target=$(cat "$RUN_DIR/score-target"), max_rounds=$(cat "$RUN_DIR/max-rounds"))"
+    case "$CFG_EM" in sonnet|haiku|opus|fable) echo "$CFG_EM" > "$RUN_DIR/executor-model" ;; esac
+    echo "Config: .claudex.json applied (allow_anthropic_only=$(cat "$RUN_DIR/allow-anthropic-only"), score_target=$(cat "$RUN_DIR/score-target"), max_rounds=$(cat "$RUN_DIR/max-rounds"), executor=$(cat "$RUN_DIR/executor-model"))"
   else
     echo "WARNING: .claudex.json present but unparseable — using defaults."
   fi
@@ -991,6 +1000,7 @@ Paper trail at end-of-run (under `$RUN_DIR/`):
 | `score-target` / `max-rounds` / `max-fix-rounds` / `panel-quorum` | Runtime constants. |
 | `codex-model`                     | Newest Codex model, resolved at preflight. |
 | `allow-anthropic-only` / `codex-disabled` / `degraded-rounds` | Degraded-mode config flag (from `.claudex.json`), live codex-seat state, and the list of rounds that ran with no external review. |
+| `test-command` / `executor-model` / `exec.v{M}.md` | Pinned test command (empty = auto-detect), EXECUTOR engine, and the per-round EXEC REPORT (GREEN/RED/NO_TESTS) that gates diff-loop convergence. |
 | `ledger.tsv` / `ledger.md`        | Run-wide deduped findings ledger (id, sev, found-by, file, issue, status) + rendered table. |
 | `lib-syntax.err`                  | Stderr of the lib.sh corruption gate (absent when clean). |
 | `<repo-root>/.claude/claudex/.lock` | Repo-level concurrency lock — a noclobber FILE (atomic create-with-content), anchored at the repo root so it's shared across subdir invocations. Contains the owner token (the active absolute `$RUN_DIR`); heartbeated each round + delegation; owner-checked release at Step 6; identity-checked stale-reclaim after 3h of no heartbeat. |
@@ -1646,6 +1656,34 @@ cat "$RUN_DIR/persona.shared.txt" "$RUN_DIR/persona.codex.txt" "$RUN_DIR/prompt.
 
 The only structural additions for the diff loop:
 
+- **The EXECUTOR seat (diff loop only, non-scoring).** The 4b fan-out launches a FOURTH parallel call: an `Agent` (`subagent_type: "general-purpose"`, `model:` from `$RUN_DIR/executor-model`) that runs the project's test suite and writes `$RUN_DIR/exec.v{M}.md`. Prompt template:
+
+  > Run this repository's test suite from the repo root. If the file `$RUN_DIR/test-command` is non-empty, run exactly that command; otherwise detect the runner (package.json scripts.test / pytest / cargo test / go test / gradle test — say which you chose and why). HARD CONSTRAINTS: you fix NOTHING and modify NO tracked file; if the run creates untracked artifacts (caches, coverage), delete them so `git status` is unchanged; if a test looks flaky, you may re-run ONCE but must report both outcomes. Write `$RUN_DIR/exec.v{M}.md` (Write tool, exactly once) in EXACTLY this shape, then return it as your final message:
+  >
+  > ```
+  > EXEC REPORT
+  > COMMAND: <what ran>
+  > EXIT: <code>
+  > RESULTS: <passed>/<total> passed, <failed> failed, <skipped> skipped
+  > VERDICT: GREEN | RED | NO_TESTS
+  > KEY OUTPUT:
+  > <fenced verbatim failure excerpts, ≤80 lines; empty when GREEN>
+  > ```
+
+  The juror MUST read the exec report every round. `RED` ⇒ the juror adds an `[EXECUTOR]` BLOCKING item quoting the failing test(s) verbatim — a red suite can never converge. `NO_TESTS` is not a blocker but MUST appear in the executive summary (it's a quality signal the user sees). The executor does not count toward review quorum.
+
+- **4e executor gate** — insert immediately after the fence-balance guard, before the convergence comparison (diff loop only):
+
+```bash
+# EXECUTOR gate: no parseable exec report with GREEN or NO_TESTS ⇒ no convergence.
+EXEC_VERDICT=$(grep -m1 '^VERDICT:' "$RUN_DIR/exec.v${M}.md" 2>/dev/null | awk '{print $2}')
+case "$EXEC_VERDICT" in
+  GREEN|NO_TESTS) echo "Executor gate: $EXEC_VERDICT" ;;
+  RED) echo "Executor gate: RED — failing tests; juror must carry an [EXECUTOR] BLOCKING item. Forcing fix-pass."; BLOCKING_COUNT=$((BLOCKING_COUNT + 1)) ;;
+  *)   echo "Executor gate: exec report missing/unparseable for round $M — forcing another round."; BLOCKING_COUNT=$((BLOCKING_COUNT + 1)) ;;
+esac
+```
+
 - The two Claude reviewer agents review the diff *in the working tree context* — their prompt points at `prompt.review.diff.body.v{M}.txt` and their review file is `review.diff.{seat}.v{M}.md`; encourage them to open changed files to verify hunks in context.
 - The collection snippet (4c) appends to `panel.impl.tsv`; quorum failure writes `session_error` to `impl.exit-reason` (HEAD is preserved; the loop exits to the report).
 - After the juror row is appended, also record the round's delta for the report (and the sha bookkeeping the fix-pass checks need):
@@ -1756,6 +1794,7 @@ The report OPENS with the executive summary — the scannable verdict — then t
 - **Open BLOCKING:** <none — all K found were fixed | n open: 1. <one-liner> 2. <one-liner>>
 - **Open MAJOR:** <same shape>
 - **Rounds:** plan <N> (<exit-reason>) · impl <M> (<exit-reason>) · degraded: <round list | none>
+- **Tests:** <GREEN (<n>/<n> passed) | RED — <one-line summary> | ⚠ no test suite found>
 - **Commits:** <count> on <branch> (<short SHAs>)
 - **Your next action:** <one line — e.g. "merge & ship", "fix open blockers 1-2 then /claudex resume", "run /claudex resume">
 ```
@@ -1841,7 +1880,8 @@ Session death (limits, compaction, crash) must not cost completed rounds — eve
 - **Claude reviewer agents are read-only by instruction.** Their only permitted write is their own review file. If one returns text but didn't write its file, you write the returned text to the expected path (transport fallback) — never re-prompt mid-round.
 - **Dirty-tree handling is delta + path-set based.** Preflight snapshots existing dirt; post-delegate checks reject NEW dirt and any pre-existing dirty path folded into a commit (protects the user's WIP).
 - **Portable timeouts.** `with_timeout` works under bash AND zsh (no parameter-expansion word-splitting tricks). The harness Bash-tool `timeout:` parameter is the primary mechanism for foreground snippets; background reviewer calls carry their own caps.
-- **Provider quota.** One panel round = 1 Codex call + 2 Sonnet subagent reviews + juror adjudication. Two loops × up to 20 rounds is the worst case — the score gate usually converges in 2–4 rounds, but know what you're spending. Each refine/fix round additionally consumes implementer/refiner quota.
+- **Static review never replaces execution.** The EXECUTOR seat exists because a panel that only READS diffs will green-light code that doesn't run (observed: an implementer demoing simulated output as success). It is non-scoring — its exit codes gate, not its opinion. Keep it read-only, keep its report format strict, and never let a RED verdict be argued away by reviewer scores.
+- **Provider quota.** One plan round = 1 Codex call + 2 Sonnet subagent reviews + juror adjudication; diff-loop rounds add one EXECUTOR test run. Two loops × up to 20 rounds is the worst case — the score gate usually converges in 2–4 rounds, but know what you're spending. Each refine/fix round additionally consumes implementer/refiner quota.
 - **Network surface.** Artifacts under `.claude/claudex/` are local. Model invocations send prompts + code + diffs to OpenAI (codex) and Anthropic (Claude planner/reviewers/juror/implementer). Both providers' policies apply — say so if the user asks.
 - **Project rules live in `CLAUDE.md`.** Architectural rules, conventions, routing, commit formats — all deferred to the project's `CLAUDE.md`. Reviewers are instructed to read it; the implementer/refiner/fixer agents should already follow it.
 - **If a reviewer disagrees with `CLAUDE.md`,** the project's `CLAUDE.md` wins. Surface the conflict to the user.
